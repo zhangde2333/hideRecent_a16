@@ -55,7 +55,7 @@ class MainHook : IXposedHookLoadPackage {
                 val taskClass = XposedHelpers.findClass("com.android.server.wm.Task", classLoader)
                 XposedBridge.hookAllMethods(taskClass, methodName, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val task = param.thisObject
+                        val task = param.thisObject ?: return  // 如果 thisObject 为 null，直接返回
                         val packageName = extractPackageNameFromTask(task)
 
                         if (packageName != null && packages.contains(packageName)) {
@@ -99,7 +99,7 @@ class MainHook : IXposedHookLoadPackage {
                         val result = param.result as? MutableList<*> ?: return
                         val iterator = result.iterator()
                         while (iterator.hasNext()) {
-                            val taskInfo = iterator.next()
+                            val taskInfo = iterator.next() ?: continue
                             val packageName = extractPackageNameFromTaskInfo(taskInfo)
                             if (packageName != null && packages.contains(packageName)) {
                                 iterator.remove()
@@ -126,7 +126,7 @@ class MainHook : IXposedHookLoadPackage {
             val taskClass = XposedHelpers.findClass("com.android.server.am.TaskRecord", classLoader)
             XposedBridge.hookAllMethods(taskClass, "isVisible", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    val task = param.thisObject
+                    val task = param.thisObject ?: return
                     val packageName = extractPackageNameFromTaskLegacy(task)
                     if (packageName != null && packages.contains(packageName)) {
                         param.result = false
