@@ -55,17 +55,23 @@ class MainHook : IXposedHookLoadPackage {
             )
 
             // 尝试多种获取 RecentTasks 实例的方式
-            val recentTasksInstance = try {
+            val recentTasksInstance: Any? = try {
                 // 方式1：通过 ATMS 的 getRecentTasks() 方法（返回 RecentTasks 对象）
-                val atmsInstance = XposedHelpers.callStaticMethod(atmsClass, "getInstance")
-                    ?: XposedHelpers.getStaticObjectField(atmsClass, "mService")
+                val atmsInstance: Any? = try {
+                    XposedHelpers.callStaticMethod(atmsClass, "getInstance")
+                } catch (e: Throwable) {
+                    XposedHelpers.getStaticObjectField(atmsClass, "mService")
+                }
                 XposedHelpers.callMethod(atmsInstance, "getRecentTasks")
             } catch (e: Throwable) {
                 // 方式2：直接读取 ATMS 的 mRecentTasks 字段
                 try {
-                    val atmsInstance = XposedHelpers.callStaticMethod(atmsClass, "getInstance")
-                        ?: XposedHelpers.getStaticObjectField(atmsClass, "mService")
-                    XposedHelpers.getObjectField(atmsInstance, "mRecentTasks")
+                    val atmsInstance: Any? = try {
+                        XposedHelpers.callStaticMethod(atmsClass, "getInstance")
+                    } catch (e2: Throwable) {
+                        XposedHelpers.getStaticObjectField(atmsClass, "mService")
+                    }
+                    XposedHelpers.getObjectField(atmsInstance!!, "mRecentTasks")
                 } catch (e2: Throwable) {
                     // 方式3：从 RecentTasks 类获取单例
                     try {
@@ -153,9 +159,10 @@ class MainHook : IXposedHookLoadPackage {
             // 获取 mVisibleTasks 字段
             val visibleTasksField = instance.javaClass.getDeclaredField("mVisibleTasks")
             visibleTasksField.isAccessible = true
-            val visibleTasks = visibleTasksField.get(instance) as? MutableList<*> ?: return
-
-            filterTaskList(visibleTasks)
+            val visibleTasks = visibleTasksField.get(instance)
+            if (visibleTasks is MutableList<*>) {
+                filterTaskList(visibleTasks)
+            }
         } catch (e: Throwable) {
             // 字段名可能变化，尝试其他名称
             tryAlternativeFieldNames(instance)
@@ -169,9 +176,10 @@ class MainHook : IXposedHookLoadPackage {
         try {
             val visibleTasksField = clazz.getDeclaredField("mVisibleTasks")
             visibleTasksField.isAccessible = true
-            val visibleTasks = visibleTasksField.get(null) as? MutableList<*> ?: return
-
-            filterTaskList(visibleTasks)
+            val visibleTasks = visibleTasksField.get(null)
+            if (visibleTasks is MutableList<*>) {
+                filterTaskList(visibleTasks)
+            }
         } catch (e: Throwable) {
             // 忽略
         }
@@ -186,12 +194,14 @@ class MainHook : IXposedHookLoadPackage {
             try {
                 val field = instance.javaClass.getDeclaredField(fieldName)
                 field.isAccessible = true
-                val list = field.get(instance) as? MutableList<*> ?: continue
-                filterTaskList(list)
-                if (BuildConfig.DEBUG) {
-                    XposedBridge.log("[HideRecent] Found alternative field: $fieldName")
+                val list = field.get(instance)
+                if (list is MutableList<*>) {
+                    filterTaskList(list)
+                    if (BuildConfig.DEBUG) {
+                        XposedBridge.log("[HideRecent] Found alternative field: $fieldName")
+                    }
+                    break
                 }
-                break
             } catch (e: Throwable) {
                 // continue
             }
@@ -206,7 +216,7 @@ class MainHook : IXposedHookLoadPackage {
         var removedCount = 0
         while (iterator.hasNext()) {
             val task = iterator.next()
-            val packageName = extractPackageNameFromTask(task)
+            val packageName = task?.let { extractPackageNameFromTask(it) }
             if (packageName != null && packages.contains(packageName)) {
                 iterator.remove()
                 removedCount++
