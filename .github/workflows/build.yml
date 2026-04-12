@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout the code
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # 获取完整历史用于生成版本号
 
       - name: Set up JDK
         uses: actions/setup-java@v3
@@ -31,13 +33,23 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle') }}
           restore-keys: ${{ runner.os }}-gradle-
 
+      - name: Generate version
+        id: version
+        run: |
+          # 基于时间戳和 commit 数生成版本号
+          TIMESTAMP=$(date +%Y%m%d)
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "version=v${TIMESTAMP}.${COMMIT_COUNT}" >> $GITHUB_OUTPUT
+          echo "name=Build ${TIMESTAMP}.${COMMIT_COUNT} (${SHORT_SHA})" >> $GITHUB_OUTPUT
+
       - name: Build the app
         run: |
           if [ ! -f "gradlew" ]; then gradle wrapper; fi
           chmod +x gradlew
           ./gradlew assemble --stacktrace
 
-      - name: Upload APK
+      - name: Upload APK to Artifact
         uses: actions/upload-artifact@v4
         with:
           name: my-build-apk
@@ -48,3 +60,17 @@ jobs:
         with:
           name: mapping
           path: app/build/outputs/mapping
+
+      # 发布到 Release
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.name }}
+          files: |
+            app/build/outputs/apk/**/*.apk
+            app/build/outputs/mapping/**/*.txt
+          generate_release_notes: true
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
