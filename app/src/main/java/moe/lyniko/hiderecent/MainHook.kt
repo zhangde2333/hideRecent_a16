@@ -56,11 +56,12 @@ class MainHook : IXposedHookLoadPackage {
         // 方案2：Hook RecentTasks.isVisibleRecentTask (备用)
         if (!hooked) {
             try {
+                val taskClass = XposedHelpers.findClass("com.android.server.wm.Task", classLoader)
                 XposedHelpers.findAndHookMethod(
                     "com.android.server.wm.RecentTasks",
                     classLoader,
                     "isVisibleRecentTask",
-                    XposedHelpers.findClass("com.android.server.wm.Task", classLoader),
+                    taskClass,
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             val task = param.args[0]
@@ -91,7 +92,8 @@ class MainHook : IXposedHookLoadPackage {
                 Int::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val result = param.result as? MutableList<*> ?: return
+                        val result = param.result as? MutableList<*>
+                        if (result == null) return
                         var removed = 0
                         val iterator = result.iterator()
                         while (iterator.hasNext()) {
@@ -120,11 +122,12 @@ class MainHook : IXposedHookLoadPackage {
 
     private fun hookLegacy(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
+            val taskRecordClass = XposedHelpers.findClass("com.android.server.am.TaskRecord", lpparam.classLoader)
             XposedHelpers.findAndHookMethod(
                 "com.android.server.am.RecentTasks",
                 lpparam.classLoader,
                 "isVisibleRecentTask",
-                XposedHelpers.findClass("com.android.server.am.TaskRecord", lpparam.classLoader),
+                taskRecordClass,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val task = param.args[0]
@@ -141,52 +144,57 @@ class MainHook : IXposedHookLoadPackage {
         }
     }
 
-    // ---------- 包名提取函数（增强日志）----------
+    // ---------- 包名提取函数 ----------
     private fun extractPackageNameFromTask(task: Any): String? {
         try {
-            // 尝试1: getBaseIntent()
             val intent = XposedHelpers.callMethod(task, "getBaseIntent") as? Intent
             val pkg = intent?.component?.packageName
             if (pkg != null) {
                 XposedBridge.log("[HideRecent] Extracted via getBaseIntent: $pkg")
                 return pkg
             }
-        } catch (e: Throwable) {}
+        } catch (e: Throwable) {
+            // ignore
+        }
         try {
-            // 尝试2: realActivity
             val realActivity = XposedHelpers.getObjectField(task, "realActivity")
-            val pkg = XposedHelpers.callMethod(realActivity, "getPackageName") as? String
+            val pkg = realActivity?.let { XposedHelpers.callMethod(it, "getPackageName") as? String }
             if (pkg != null) {
                 XposedBridge.log("[HideRecent] Extracted via realActivity: $pkg")
                 return pkg
             }
-        } catch (e: Throwable) {}
+        } catch (e: Throwable) {
+            // ignore
+        }
         try {
-            // 尝试3: topActivity
             val topActivity = XposedHelpers.getObjectField(task, "topActivity")
-            val topIntent = XposedHelpers.callMethod(topActivity, "getIntent") as? Intent
+            val topIntent = topActivity?.let { XposedHelpers.callMethod(it, "getIntent") as? Intent }
             val pkg = topIntent?.component?.packageName
             if (pkg != null) {
                 XposedBridge.log("[HideRecent] Extracted via topActivity: $pkg")
                 return pkg
             }
-        } catch (e: Throwable) {}
+        } catch (e: Throwable) {
+            // ignore
+        }
         try {
-            // 尝试4: getTaskInfo().topActivity
             val taskInfo = XposedHelpers.callMethod(task, "getTaskInfo")
             val topActivityComp = XposedHelpers.getObjectField(taskInfo, "topActivity")
             val compStr = topActivityComp?.toString()
             val pkg = compStr?.substringBefore("/")
-            if (pkg != null && pkg.isNotEmpty()) {
+            if (!pkg.isNullOrEmpty()) {
                 XposedBridge.log("[HideRecent] Extracted via taskInfo.topActivity: $pkg")
                 return pkg
             }
-        } catch (e: Throwable) {}
+        } catch (e: Throwable) {
+            // ignore
+        }
         XposedBridge.log("[HideRecent] ⚠️ Failed to extract package from task: $task")
         return null
     }
 
-    private fun extractPackageNameFromTaskInfo(taskInfo: Any): String? {
+    private fun extractPackageNameFromTaskInfo(taskInfo: Any?): String? {
+        if (taskInfo == null) return null
         try {
             val intent = XposedHelpers.getObjectField(taskInfo, "baseIntent") as? Intent
             return intent?.component?.packageName
@@ -201,11 +209,11 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private fun extractPackageNameFromTaskLegacy(task: Any): String? {
-        try {
+        return try {
             val intent = XposedHelpers.getObjectField(task, "intent") as? Intent
-            return intent?.component?.packageName
+            intent?.component?.packageName
         } catch (e: Throwable) {
-            return null
+            null
         }
     }
 }
