@@ -6,7 +6,11 @@ Designed in pure Kotlin & Jetpack Compose & Material Design 3. Can be a template
 
 ![UI Screenshot](https://github.com/Young-Lord/hideRecent/raw/master/assets/image/preview.jpg)
 ##我修改的
+
+
 增加了a16兼容性，hook ATMS来实现高版本安卓下最近任务的隐藏。因为在我自己的手机上使用应用出现了黑屏，关闭此模块后现象消失。因此使用了AI大法修改了hook点位，目前最新app已经没有黑屏问题。理论上兼容高版本的安卓（或许）
+
+
 ## How to use
 
 > Tested on: Android 10 (AOSP),  Android 11 (MIUI 12), Android 13 (AOSP), Android 13 (MIUI 14), Android 14 (AOSP); may work on [10 <= Android <= 14](http://aospxref.com/android-10.0.0_r47/xref/frameworks/base/services/core/java/com/android/server/wm/RecentTasks.java#1272)
