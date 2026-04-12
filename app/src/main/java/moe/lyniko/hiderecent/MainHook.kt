@@ -15,77 +15,72 @@ class MainHook : IXposedHookLoadPackage {
     private lateinit var packages: MutableSet<String>
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        // 仅在 system_server 进程中进行 hook
         if (lpparam.packageName != "android") return
 
-        // 加载配置
         val xsp = XSharedPreferences(BuildConfig.APPLICATION_ID, PreferenceUtils.functionalConfigName)
         xsp.makeWorldReadable()
         packages = PreferenceUtils.getPackageListFromPref(xsp)
+        XposedBridge.log("[HideRecent] Loaded ${packages.size} packages to hide: $packages")
 
-        // 根据 Android 版本执行不同的 hook 策略
-        when {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> {
-                hookTaskIsVisible(lpparam)
-            }
-            else -> {
-                hookLegacyAms(lpparam)
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            hookTaskVisibility(lpparam)
+        } else {
+            hookLegacy(lpparam)
         }
     }
 
-    /**
-     * 主方案：直接 Hook Task 类的 isVisible 方法
-     * 适用于 Android 10 及以上版本，包括 Android 16
-     */
-    private fun hookTaskIsVisible(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookTaskVisibility(lpparam: XC_LoadPackage.LoadPackageParam) {
         val classLoader = lpparam.classLoader
-
-        // 尝试多种可能的可见性判断方法
-        val methodNames = arrayOf(
-            "isVisible",
-            "isVisibleForUser",
-            "shouldBeVisible",
-            "isTaskVisible"
-        )
-
         var hooked = false
-        for (methodName in methodNames) {
-            try {
-                val taskClass = XposedHelpers.findClass("com.android.server.wm.Task", classLoader)
-                XposedBridge.hookAllMethods(taskClass, methodName, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val task = param.thisObject ?: return  // 如果 thisObject 为 null，直接返回
-                        val packageName = extractPackageNameFromTask(task)
 
-                        if (packageName != null && packages.contains(packageName)) {
-                            param.result = false
-                            if (BuildConfig.DEBUG) {
-                                XposedBridge.log("[HideRecent] Task.$methodName -> false for: $packageName")
+        // 方案1：Hook Task.isVisible (最常见)
+        try {
+            val taskClass = XposedHelpers.findClass("com.android.server.wm.Task", classLoader)
+            XposedBridge.hookAllMethods(taskClass, "isVisible", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val task = param.thisObject
+                    val packageName = extractPackageNameFromTask(task)
+                    XposedBridge.log("[HideRecent] Task.isVisible called for $packageName, original result=${param.result}")
+                    if (packageName != null && packages.contains(packageName)) {
+                        param.result = false
+                        XposedBridge.log("[HideRecent] Force hidden: $packageName")
+                    }
+                }
+            })
+            XposedBridge.log("[HideRecent] ✅ Hooked Task.isVisible")
+            hooked = true
+        } catch (e: Throwable) {
+            XposedBridge.log("[HideRecent] ❌ Task.isVisible hook failed: ${e.message}")
+        }
+
+        // 方案2：Hook RecentTasks.isVisibleRecentTask (备用)
+        if (!hooked) {
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.server.wm.RecentTasks",
+                    classLoader,
+                    "isVisibleRecentTask",
+                    XposedHelpers.findClass("com.android.server.wm.Task", classLoader),
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val task = param.args[0]
+                            val packageName = extractPackageNameFromTask(task)
+                            XposedBridge.log("[HideRecent] RecentTasks.isVisibleRecentTask called for $packageName")
+                            if (packageName != null && packages.contains(packageName)) {
+                                param.result = false
+                                XposedBridge.log("[HideRecent] Force hidden via RecentTasks: $packageName")
                             }
                         }
                     }
-                })
-                XposedBridge.log("[HideRecent] Successfully hooked Task.$methodName")
+                )
+                XposedBridge.log("[HideRecent] ✅ Hooked RecentTasks.isVisibleRecentTask")
                 hooked = true
-                break
             } catch (e: Throwable) {
-                // 继续尝试下一个方法名
+                XposedBridge.log("[HideRecent] ❌ RecentTasks hook failed: ${e.message}")
             }
         }
 
-        if (!hooked) {
-            XposedBridge.log("[HideRecent] Failed to hook any Task visibility method, fallback to ATMS")
-            hookAtmsFallback(lpparam)
-        }
-    }
-
-    /**
-     * 备选方案：Hook ActivityTaskManagerService.getRecentTasks
-     * 当 Task 可见性 Hook 失败时使用
-     */
-    private fun hookAtmsFallback(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val classLoader = lpparam.classLoader
+        // 方案3：Hook ATMS.getRecentTasks 返回值过滤
         try {
             XposedHelpers.findAndHookMethod(
                 "com.android.server.wm.ActivityTaskManagerService",
@@ -97,115 +92,120 @@ class MainHook : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val result = param.result as? MutableList<*> ?: return
+                        var removed = 0
                         val iterator = result.iterator()
                         while (iterator.hasNext()) {
-                            val taskInfo = iterator.next() ?: continue
+                            val taskInfo = iterator.next()
                             val packageName = extractPackageNameFromTaskInfo(taskInfo)
                             if (packageName != null && packages.contains(packageName)) {
                                 iterator.remove()
-                                if (BuildConfig.DEBUG) {
-                                    XposedBridge.log("[HideRecent] Filtered from getRecentTasks: $packageName")
-                                }
+                                removed++
                             }
+                        }
+                        if (removed > 0) {
+                            XposedBridge.log("[HideRecent] Removed $removed tasks from getRecentTasks result")
                         }
                     }
                 }
             )
-            XposedBridge.log("[HideRecent] ATMS fallback hooked successfully")
+            XposedBridge.log("[HideRecent] ✅ Hooked ATMS.getRecentTasks (result filter)")
         } catch (e: Throwable) {
-            XposedBridge.log("[HideRecent] ATMS fallback failed: ${e.message}")
+            XposedBridge.log("[HideRecent] ❌ ATMS.getRecentTasks hook failed: ${e.message}")
+        }
+
+        if (!hooked) {
+            XposedBridge.log("[HideRecent] ⚠️ No primary visibility hook succeeded! Module may not work.")
         }
     }
 
-    /**
-     * 兼容 Android 9 及以下版本的 AMS Hook
-     */
-    private fun hookLegacyAms(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val classLoader = lpparam.classLoader
+    private fun hookLegacy(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
-            val taskClass = XposedHelpers.findClass("com.android.server.am.TaskRecord", classLoader)
-            XposedBridge.hookAllMethods(taskClass, "isVisible", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val task = param.thisObject ?: return
-                    val packageName = extractPackageNameFromTaskLegacy(task)
-                    if (packageName != null && packages.contains(packageName)) {
-                        param.result = false
-                        if (BuildConfig.DEBUG) {
-                            XposedBridge.log("[HideRecent] LEGACY Task.isVisible -> false for: $packageName")
+            XposedHelpers.findAndHookMethod(
+                "com.android.server.am.RecentTasks",
+                lpparam.classLoader,
+                "isVisibleRecentTask",
+                XposedHelpers.findClass("com.android.server.am.TaskRecord", lpparam.classLoader),
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val task = param.args[0]
+                        val packageName = extractPackageNameFromTaskLegacy(task)
+                        if (packageName != null && packages.contains(packageName)) {
+                            param.result = false
                         }
                     }
                 }
-            })
-            XposedBridge.log("[HideRecent] LEGACY: Hooked TaskRecord.isVisible")
+            )
+            XposedBridge.log("[HideRecent] ✅ Hooked legacy RecentTasks")
         } catch (e: Throwable) {
-            XposedBridge.log("[HideRecent] LEGACY: Failed to hook: ${e.message}")
+            XposedBridge.log("[HideRecent] ❌ Legacy hook failed: ${e.message}")
         }
     }
 
-    /**
-     * 从 Task 对象中提取包名（多种降级方案）
-     */
+    // ---------- 包名提取函数（增强日志）----------
     private fun extractPackageNameFromTask(task: Any): String? {
-        return try {
-            // 方式1：通过 getBaseIntent() 获取
+        try {
+            // 尝试1: getBaseIntent()
             val intent = XposedHelpers.callMethod(task, "getBaseIntent") as? Intent
-            intent?.component?.packageName
-        } catch (e: Throwable) {
-            try {
-                // 方式2：通过 realActivity 字段
-                val realActivity = XposedHelpers.getObjectField(task, "realActivity")
-                XposedHelpers.callMethod(realActivity, "getPackageName") as? String
-            } catch (e2: Throwable) {
-                try {
-                    // 方式3：通过 topActivity 字段
-                    val topActivity = XposedHelpers.getObjectField(task, "topActivity")
-                    val topIntent = XposedHelpers.callMethod(topActivity, "getIntent") as? Intent
-                    topIntent?.component?.packageName
-                } catch (e3: Throwable) {
-                    try {
-                        // 方式4：通过 getTaskInfo().topActivity
-                        val taskInfo = XposedHelpers.callMethod(task, "getTaskInfo")
-                        val topActivityComp = XposedHelpers.getObjectField(taskInfo, "topActivity")
-                        topActivityComp?.toString()?.substringBefore("/")
-                    } catch (e4: Throwable) {
-                        null
-                    }
-                }
+            val pkg = intent?.component?.packageName
+            if (pkg != null) {
+                XposedBridge.log("[HideRecent] Extracted via getBaseIntent: $pkg")
+                return pkg
             }
-        }
+        } catch (e: Throwable) {}
+        try {
+            // 尝试2: realActivity
+            val realActivity = XposedHelpers.getObjectField(task, "realActivity")
+            val pkg = XposedHelpers.callMethod(realActivity, "getPackageName") as? String
+            if (pkg != null) {
+                XposedBridge.log("[HideRecent] Extracted via realActivity: $pkg")
+                return pkg
+            }
+        } catch (e: Throwable) {}
+        try {
+            // 尝试3: topActivity
+            val topActivity = XposedHelpers.getObjectField(task, "topActivity")
+            val topIntent = XposedHelpers.callMethod(topActivity, "getIntent") as? Intent
+            val pkg = topIntent?.component?.packageName
+            if (pkg != null) {
+                XposedBridge.log("[HideRecent] Extracted via topActivity: $pkg")
+                return pkg
+            }
+        } catch (e: Throwable) {}
+        try {
+            // 尝试4: getTaskInfo().topActivity
+            val taskInfo = XposedHelpers.callMethod(task, "getTaskInfo")
+            val topActivityComp = XposedHelpers.getObjectField(taskInfo, "topActivity")
+            val compStr = topActivityComp?.toString()
+            val pkg = compStr?.substringBefore("/")
+            if (pkg != null && pkg.isNotEmpty()) {
+                XposedBridge.log("[HideRecent] Extracted via taskInfo.topActivity: $pkg")
+                return pkg
+            }
+        } catch (e: Throwable) {}
+        XposedBridge.log("[HideRecent] ⚠️ Failed to extract package from task: $task")
+        return null
     }
 
-    /**
-     * 从 TaskInfo 对象中提取包名（用于 getRecentTasks 返回值）
-     */
     private fun extractPackageNameFromTaskInfo(taskInfo: Any): String? {
-        return try {
+        try {
             val intent = XposedHelpers.getObjectField(taskInfo, "baseIntent") as? Intent
-            intent?.component?.packageName
+            return intent?.component?.packageName
         } catch (e: Throwable) {
             try {
                 val topActivity = XposedHelpers.getObjectField(taskInfo, "topActivity")
-                topActivity?.toString()?.substringBefore("/")
+                return topActivity?.toString()?.substringBefore("/")
             } catch (e2: Throwable) {
-                null
+                return null
             }
         }
     }
 
-    /**
-     * 从旧版 TaskRecord 中提取包名
-     */
     private fun extractPackageNameFromTaskLegacy(task: Any): String? {
-        return try {
+        try {
             val intent = XposedHelpers.getObjectField(task, "intent") as? Intent
-            intent?.component?.packageName
+            return intent?.component?.packageName
         } catch (e: Throwable) {
-            try {
-                val realActivity = XposedHelpers.getObjectField(task, "realActivity")
-                realActivity?.toString()?.substringBefore("/")
-            } catch (e2: Throwable) {
-                null
-            }
+            return null
         }
     }
 }
