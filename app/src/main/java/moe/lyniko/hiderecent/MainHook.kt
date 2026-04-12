@@ -69,12 +69,12 @@ class MainHook : IXposedHookLoadPackage {
                             if (pkgName != null && packages.contains(pkgName)) {
                                 iterator.remove()
                                 removedCount++
-                                XposedBridge.log("[HideRecent] Removed: $pkgName")
+                                
                             }
                         }
 
                         if (removedCount > 0) {
-                            XposedBridge.log("[HideRecent] Total removed $removedCount tasks")
+                            
                         }
                     }
                 }
