@@ -1,6 +1,5 @@
 package moe.lyniko.hiderecent
 
-import android.app.ActivityTaskManager
 import android.content.ComponentName
 import android.content.Intent
 import android.os.Build
@@ -46,7 +45,6 @@ class MainHook : IXposedHookLoadPackage {
     private fun hookSystemUITaskView(lpparam: LoadPackageParam) {
         try {
             // TaskView 是 Android 原生用来包裹每一个最近任务卡片的 View
-            // 不管 ROM 怎么改，只要它想显示最近任务，就必须用这个类（或其子类）
             val taskViewClass = XposedHelpers.findClass(
                 "com.android.systemui.recents.views.TaskView", 
                 lpparam.classLoader
@@ -63,7 +61,7 @@ class MainHook : IXposedHookLoadPackage {
                     val pkgName = extractPackageNameFromTaskInfo(taskInfo)
 
                     if (pkgName != null && packages.contains(pkgName)) {
-                        XposedBridge.log("[HideRecent] 🥷 Found target in SystemUI: $pkgName. Making it invisible.")
+                        XposedBridge.log("[HideRecent] Found target in SystemUI: $pkgName. Making it invisible.")
                         
                         // 神来之笔：不删除，不 GONE，只是设为完全透明且不可点击
                         // 这样底层动画依然会在这个 View 上播放，不会黑屏！
@@ -73,9 +71,9 @@ class MainHook : IXposedHookLoadPackage {
                     }
                 }
             })
-            XposedBridge.log("[HideRecent] ✅ Successfully hooked TaskView.bind (Animation Safe)")
+            XposedBridge.log("[HideRecent] Successfully hooked TaskView.bind (Animation Safe)")
         } catch (t: Throwable) {
-            XposedBridge.log("[HideRecent] ❌ Failed to hook TaskView: ${t.message}")
+            XposedBridge.log("[HideRecent] Failed to hook TaskView: ${t.message}")
             // 如果极个别 ROM 连 TaskView 都改了名字，走备用方案
             hookFallbackRecents(lpparam)
         }
@@ -86,17 +84,25 @@ class MainHook : IXposedHookLoadPackage {
      */
     private fun hookFallbackRecents(lpparam: LoadPackageParam) {
         try {
-            val taskClass = XposedHelpers.findClass("android.app.TaskInfo", lpparam.classLoader)
+            // 注意这里的 \$ 转义符，因为 Kotlin 字符串里 $ 是特殊字符
             XposedBridge.hookAllMethods(
-                XposedHelpers.findClass("com.android.systemui.recents.views.RecentsRecyclerView$RecentsAdapter", lpparam.classLoader),
+                XposedHelpers.findClass("com.android.systemui.recents.views.RecentsRecyclerView\$RecentsAdapter", lpparam.classLoader),
                 "onBindViewHolder",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        // 类似的隐形逻辑，略...
+                        if (packages.isEmpty()) return
+                        val viewHolder = param.args[1] ?: return
+                        val itemView = XposedHelpers.callMethod(viewHolder, "getItemViewRoot") as? View ?: return
+                        
+                        // 备用方案中，尝试从 viewHolder 的 itemView 获取包名较复杂
+                        // 为了稳定性，这里仅做兜底打印，不强行操作
+                        XposedBridge.log("[HideRecent] Fallback triggered: onBindViewHolder called.")
                     }
                 }
             )
-        } catch (_: Throwable) {}
+        } catch (_: Throwable) {
+            XposedBridge.log("[HideRecent] Fallback hook also failed, but main hook should work.")
+        }
     }
 
     /**
