@@ -16,92 +16,102 @@ class MainHook : IXposedHookLoadPackage {
     private lateinit var packages: Set<String>
 
     override fun handleLoadPackage(lpparam: LoadPackageParam) {
-        // 1. 加载配置（在两个进程中都会执行一次）
         if (lpparam.packageName == "android" || lpparam.packageName == "com.android.systemui") {
             loadConfig()
         }
 
-        // 2. 分发 Hook 逻辑
         when (lpparam.packageName) {
             "android" -> {
-                // 对于 Android 16，不在系统服务端删数据，防止打断动画
+                // Android 16 不在服务端删数据，防黑屏
                 if (Build.VERSION.SDK_INT < 36) {
                     hookLegacyVisibility(lpparam)
-                } else {
-                    XposedBridge.log("[HideRecent] Android 16 detected, skipping server-side data removal to prevent black screen.")
                 }
             }
             "com.android.systemui" -> {
-                // 核心大杀器：在 UI 绘制层将其隐形
-                hookSystemUITaskView(lpparam)
+                hookSystemUISafe(lpparam)
             }
         }
     }
 
     /**
-     * 核心方案：Hook SystemUI 中负责绘制每一个任务卡片的容器
-     * 优点：完全不影响底层动画流水线，绝对不会黑屏
+     * 核心：带双重保险的 SystemUI Hook
      */
-    private fun hookSystemUITaskView(lpparam: LoadPackageParam) {
-        try {
-            // TaskView 是 Android 原生用来包裹每一个最近任务卡片的 View
-            val taskViewClass = XposedHelpers.findClass(
-                "com.android.systemui.recents.views.TaskView", 
-                lpparam.classLoader
-            )
+    private fun hookSystemUISafe(lpparam: LoadPackageParam) {
+        var taskViewHooked = false
 
-            // Hook TaskView 的 bind 方法（当系统把任务数据绑定到这个 View 上时触发）
+        // ==========================================
+        // 方案 A：尝试精准隐形 TaskView (首选)
+        // ==========================================
+        try {
+            // 防弹级字符串拼接：防止任何复制粘贴/编码把 "." 变成 "$"
+            val className = String(charArrayOf(
+                'c','o','m','.','a','n','d','r','o','i','d','.',
+                's','y','s','t','e','m','u','i','.',
+                'r','e','c','e','n','t','s','.',
+                'v','i','e','w','s','.',
+                'T','a','s','k','V','i','e','w'
+            ))
+            
+            val taskViewClass = XposedHelpers.findClass(className, lpparam.classLoader)
+
             XposedBridge.hookAllMethods(taskViewClass, "bind", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     if (packages.isEmpty()) return
                     val taskView = param.thisObject as View
-
-                    // 从参数中提取 TaskInfo（bind 方法的第一个参数通常是 TaskInfo）
                     val taskInfo = param.args.firstOrNull() ?: return
                     val pkgName = extractPackageNameFromTaskInfo(taskInfo)
 
                     if (pkgName != null && packages.contains(pkgName)) {
-                        XposedBridge.log("[HideRecent] Found target in SystemUI: $pkgName. Making it invisible.")
-                        
-                        // 神来之笔：不删除，不 GONE，只是设为完全透明且不可点击
-                        // 这样底层动画依然会在这个 View 上播放，不会黑屏！
+                        XposedBridge.log("[HideRecent] TaskView bind intercepted: $pkgName. Hiding...")
                         taskView.alpha = 0f
                         taskView.isClickable = false
-                        taskView.visibility = View.INVISIBLE // 用 INVISIBLE 而不是 GONE，保留它占用的动画空间
+                        taskView.visibility = View.INVISIBLE
                     }
                 }
             })
-            XposedBridge.log("[HideRecent] Successfully hooked TaskView.bind (Animation Safe)")
+            taskViewHooked = true
+            XposedBridge.log("[HideRecent] ✅ TaskView hooked successfully!")
         } catch (t: Throwable) {
-            XposedBridge.log("[HideRecent] Failed to hook TaskView: ${t.message}")
-            // 如果极个别 ROM 连 TaskView 都改了名字，走备用方案
-            hookFallbackRecents(lpparam)
+            XposedBridge.log("[HideRecent] ⚠️ TaskView not found: ${t.message}")
         }
-    }
 
-    /**
-     * 备用方案：如果找不到 TaskView，尝试 Hook RecyclerView 的 Adapter
-     */
-    private fun hookFallbackRecents(lpparam: LoadPackageParam) {
-        try {
-            // 注意这里的 \$ 转义符，因为 Kotlin 字符串里 $ 是特殊字符
-            XposedBridge.hookAllMethods(
-                XposedHelpers.findClass("com.android.systemui.recents.views.RecentsRecyclerView\$RecentsAdapter", lpparam.classLoader),
-                "onBindViewHolder",
-                object : XC_MethodHook() {
+        // ==========================================
+        // 方案 B：兜底策略 - 阉割 TaskInfo 数据
+        // 如果上面的 UI 类找不到，就在数据源头把包名清空
+        // 效果：卡片变成空白占位符（不黑屏，但能隐藏信息）
+        // ==========================================
+        if (!taskViewHooked) {
+            XposedBridge.log("[HideRecent] Falling back to TaskInfo data stripping...")
+            try {
+                val taskInfoClass = XposedHelpers.findClass("android.app.TaskInfo", lpparam.classLoader)
+
+                // 拦截获取 Intent 的请求
+                XposedBridge.hookAllMethods(taskInfoClass, "getBaseIntent", object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (packages.isEmpty()) return
-                        val viewHolder = param.args[1] ?: return
-                        val itemView = XposedHelpers.callMethod(viewHolder, "getItemViewRoot") as? View ?: return
-                        
-                        // 备用方案中，尝试从 viewHolder 的 itemView 获取包名较复杂
-                        // 为了稳定性，这里仅做兜底打印，不强行操作
-                        XposedBridge.log("[HideRecent] Fallback triggered: onBindViewHolder called.")
+                        val intent = param.result as? Intent ?: return
+                        val pkg = intent.component?.packageName ?: return
+                        if (packages.contains(pkg)) {
+                            // 把包名清空，SystemUI 就无法加载图标和标题
+                            intent.component = ComponentName("", "")
+                            XposedBridge.log("[HideRecent] Stripped baseIntent for: $pkg")
+                        }
                     }
-                }
-            )
-        } catch (_: Throwable) {
-            XposedBridge.log("[HideRecent] Fallback hook also failed, but main hook should work.")
+                })
+
+                // 拦截获取顶部 Activity 的请求
+                XposedBridge.hookAllMethods(taskInfoClass, "getTopActivity", object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val comp = param.result as? ComponentName ?: return
+                        if (packages.contains(comp.packageName)) {
+                            param.result = ComponentName("", "")
+                            XposedBridge.log("[HideRecent] Stripped topActivity for: ${comp.packageName}")
+                        }
+                    }
+                })
+                XposedBridge.log("[HideRecent] ✅ Fallback TaskInfo hook installed!")
+            } catch (t: Throwable) {
+                XposedBridge.log("[HideRecent] ❌ Fallback failed: ${t.message}")
+            }
         }
     }
 
