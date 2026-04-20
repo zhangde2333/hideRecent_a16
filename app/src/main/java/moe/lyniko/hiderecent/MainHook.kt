@@ -54,7 +54,7 @@ class MainHook : IXposedHookLoadPackage {
                             // 如果过滤后数量没变，说明没有需要隐藏的，直接放行，减少性能损耗
                             if (filteredList.size == originalList.size) return
 
-                            XposedBridge.log("[HideRecent] Target found! Original: ${originalList.size}, Filtered: ${filteredList.size}")
+                            
 
                             // 3. 神来之笔：反射获取 ParceledListSlice 的构造函数
                             // 它有一个公开的构造方法：public ParceledListSlice(List<T> list)
@@ -66,7 +66,6 @@ class MainHook : IXposedHookLoadPackage {
 
                             // 5. 偷天换日：把系统原来的返回值替换成我们新建的包裹
                             param.result = newSlice
-                            XposedBridge.log("[HideRecent] ✅ Successfully replaced ParceledListSlice! No black screen guaranteed.")
 
                         } catch (t: Throwable) {
                             XposedBridge.log("[HideRecent] ❌ Rebuild failed: ${t.message}")
