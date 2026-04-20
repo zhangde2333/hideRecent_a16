@@ -5,7 +5,7 @@ Simple module to hide any app from recent task list.
 Designed in pure Kotlin & Jetpack Compose & Material Design 3. Can be a template for any Xposed module with an application selection list.
 
 ![UI Screenshot](https://github.com/Young-Lord/hideRecent/raw/master/assets/image/preview.jpg)
-##我修改的
+## 我修改的
 
 
 增加了a16兼容性，hook ATMS来实现高版本安卓下最近任务的隐藏。因为在我自己的手机上使用应用出现了黑屏，关闭此模块后现象消失。因此使用了AI大法修改了hook点位，目前最新app已经没有黑屏问题。理论上兼容高版本的安卓（或许）
